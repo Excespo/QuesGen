@@ -127,3 +127,8 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# ignore datasets
+data/SQuAD2.0/
+data/WebSRC/complete/
+data/WebSRC/reduced/
