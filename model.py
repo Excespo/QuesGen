@@ -2,201 +2,89 @@ import os
 
 import torch
 import torch.nn as nn
-from transformers.modeling_bert import BertAttention, BertPreTrainedModel
-from transformers import PretrainedConfig
 from torch.utils.data import Dataset
+
+from transformers import PretrainedConfig
+
+from transformers.models.bart.configuration_bart import BartConfig
+from transformers.models.bart.modeling_bart import BartPretrainedModel
+
 import numpy as np
 
+# moved into `dataset.py`
+class StrctDataset(Dataset):
+    """Dataset wrapping tensors
 
-class StrucDataset(Dataset):
-    """Dataset wrapping tensors.
-
-    Each sample will be retrie ed by indexing tensors along the first dimension.
+    Each sample will be retrieved by indexing tensors along the first dimension
+    Later the dataset is sent into a sampler then a dataloader, and transfer to `input` in training phase
 
     Arguments:
-        *tensors (*torch.Tensor): tensors that have the same size of the first dimension.
-        page_ids (list): the corresponding page ids of the input features.
-        cnn_feature_dir (str): the direction where the cnn features are stored.
-        token_to_tag (torch.Tensor): the mapping from each token to its corresponding tag id.
+        *tensors (*torch.Tensor): tensors having the same size of the first dimension. 
+            For example (all_input_ids, all_input_masks, all_segment_ids, all_feature_index)
+        page_id (list): the corresponding page_ids of the input features.
+        token_to_tag (torch.Tensor): the mapping from each token to its corresponding tag id
     """
 
-    def __init__(self, *tensors, page_ids=None, cnn_feature_dir=None, token_to_tag=None):
-        tensors = tuple(tensor for tensor in tensors) # genereate a tuple of tensors, not a generator
-        assert all(len(tensors[0]) == len(tensor) for tensor in tensors) # ensure that all tensors have the same size of the first dimension
+    def __init__(self, *tensors, page_ids=None, token_to_tag=None):
+        tensors = tuple(tensor for tensor in tensors)
+        assert all(len(tensors[0]) == len(tensor) for tensor in tensors), "Invalid input tensors with different size in the 1st dimension, expected same size."
         self.tensors = tensors
         self.page_ids = page_ids
-        self.cnn_feature_dir = cnn_feature_dir
         self.token_to_tag = token_to_tag
-        self._init_cnn_feature() # cnn feature is the tag's screenshot's extract
 
     def __getitem__(self, index):
-        output = [tensor[index] for tensor in self.tensors]
-        if self.cnn_feature is not None: # if take advantage of cnn features, 
-            page_id, ind = self.page_ids[index], self.token_to_tag[index]
-            raw_cnn_feature = self.cnn_feature[page_id]
-            assert ind.dim() == 1
-            cnn_num, cnn_dim = raw_cnn_feature.size()
-            ind[ind >= cnn_num] = cnn_num - 1 # ?
-            ind = ind.unsqueeze(1).repeat([1, cnn_dim]) # ?
-            cnn_feature = torch.gather(raw_cnn_feature, 0, ind) # ?
-            output.append(cnn_feature)
-        return tuple(item for item in output)
+        return tuple(tensor[index] for tensor in self.tensors) # return the indexed tensors if no features from other modalities is required
 
     def __len__(self):
         return len(self.tensors[0])
 
-    def _init_cnn_feature(self):
-        if self.cnn_feature_dir is None:
-            self.cnn_feature = None
-            return
-        self.cnn_feature = {}
-        cnn_feature_dir = os.walk(self.cnn_feature_dir)
-        for d, _, fs in cnn_feature_dir:
-            for f in fs:
-                if f.split('.')[-1] != 'npy':
-                    continue
-                domain = d.split('/')[-3][:2]
-                page = f.split('.')[0]
-                temp = torch.as_tensor(np.load(os.path.join(d, f)), dtype=torch.float)
-                self.cnn_feature[domain + page] = torch.cat([temp, torch.zeros_like(temp[0]).unsqueeze(0)], dim=0)
-        return
+
+# Lists of strs storing the name of backbones and methods, corresponding to different (total) model TODO
+__BACKBONES__ = ["baseline", "bart"] # backbones pretrained models supported in the model, baseline is Bart
+__METHODS__ = ["baseline", "text_html"] # features-using methods supported in the model, baseline is textual and html features
+
+def to_model(backbone, method, config):
+    if backbone == "bart" and method == "text_html":
+        model_config = BartConfig(config)
+        return Bart(model_config)
+    else:
+        raise NotImplementedError("A combination of backbone and method unrecognizable")
 
 
-class VConfig(PretrainedConfig):
-    r"""
-    The configuration class to store the configuration of V-PLM
+class BaseModelConfig(PretrainedConfig):
+    """The configuration base class to store the basic configurations of all models
 
     Arguments:
-        method (str): the name of the method in use, choice: ['T-PLM', 'H-PLM', 'V-PLM'].
-        model_type (str): the model type of the backbone PLM, currently support BERT and Electra.
-        num_node_block (int): the number of the visual information enhanced self-attention block in use.
-        cnn_feature_dim (int): the dimension of the provided cnn features.
-        kwargs (dict): the other configuration which the configuration of the PLM in use needs.
+        backbone (str): the name of the backbone models, see __BACKBONES__
+        method (str): the name of the methods using different modalities or other features, see __METHODS__
+        kwargs (dict): correspond to the `PretrainedConfig` usage
     """
-    def __init__(self,
-                 args,
-                 **kwargs):
+    def __self__(self, backbone, method, **kwargs):
         super().__init__(**kwargs)
-        self.method = args.method
-        self.model_type = args.model_type
-        self.num_node_block = args.num_node_block
-        self.cnn_feature_dim = args.cnn_feature_dim
-        self.cat_hidden_size = self.hidden_size
-        if self.method == 'V-PLM':
-            self.cat_hidden_size += self.cnn_feature_dim
+        self.backbone = backbone if backbone in __BACKBONES__ else "baseline"
+        self.method = method if method in __METHODS__ else "baseline"
 
-
-class VBlock(nn.Module):
-    r"""
-    the visual information enhanced self-attention block.
+class Backbone(nn.Module):
+    """
+    The wrapper class for backbone pretrained model
     """
     def __init__(self, config):
-        super().__init__()
-        self.method = config.method
-        self.attention = BertAttention(config)
-        self.dense = nn.Linear(config.cat_hidden_size, config.hidden_size)
-        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        pass
 
-    def forward(
-            self,
-            inputs,
-            visual_feature,
-            attention_mask=None,
-            head_mask=None
-    ):
-        if self.method == 'V-PLM':
-            assert visual_feature.dim() == 3
-            output = torch.cat([inputs, visual_feature], dim=2)
-        else:
-            output = inputs
-        output = self.dense(output)
-        output = self.dropout(output)
-        output = self.LayerNorm(output + inputs)
-
-        extended_attention_mask = attention_mask[:, None, None, :]
-        extended_attention_mask = extended_attention_mask.to(dtype=self.dense.weight.dtype)
-        extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
-        output = self.attention(output, attention_mask=extended_attention_mask, head_mask=head_mask)[0]
-
-        return output
-
-
-class VPLM(BertPreTrainedModel):
-    r"""
-    the V-PLM model.
-
-    Arguments:
-        ptm: the Pretrained Language Model backbone in use, currently support BERT and Electra.
-        config (VConfig): the configuration for V-PLM.
+class QuesGenModel(nn.Module):
     """
-    def __init__(self, ptm, config: VConfig):
-        super(VPLM, self).__init__(config)
-        self.base_type = config.model_type
-        if config.model_type == 'bert':
-            self.ptm = ptm.bert 
-            # in run.py it called `AutoModelForQuestionAnswering.from_pretrained(...)`
-            # see in `transformer/modeling_auto.py`, it
-        elif config.model_type == 'electra':
-            self.ptm = ptm.electra
-        else:
-            raise NotImplementedError()
-        self.struc = nn.ModuleList([VBlock(config) for _ in range(config.num_node_block)])
-        self.qa_outputs = ptm.qa_outputs
+    The model class wrapper for all backbones and methods
+    """
+    pass
+
+class Bart(BartPretrainedModel):
+    """
+    """
+    def __init__(self, config):
+        super(Bart, self).__init__(config) # diff super() <-> super(Bart, self) ?
+        self.
 
     def forward(
-            self,
-            input_ids,
-            attention_mask=None,
-            token_type_ids=None,
-            position_ids=None,
-            head_mask=None,
-            inputs_embeds=None,
-            start_positions=None,
-            end_positions=None,
-            visual_feature=None
-    ):
-        outputs = self.ptm(
-            input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            position_ids=position_ids,
-            head_mask=head_mask,
-            inputs_embeds=inputs_embeds,
+        self,
+        input 
         )
-
-        sequence_output = outputs[0]
-
-        for i, layer in enumerate(self.struc):
-            sequence_output = layer(sequence_output, visual_feature, attention_mask=attention_mask, head_mask=head_mask)
-
-        logits = self.qa_outputs(sequence_output)
-        start_logits, end_logits = logits.split(1, dim=-1) # equals to torch.split(logits, split_size_or_sections=1, dim=-1)
-        start_logits = start_logits.squeeze(-1)
-        end_logits = end_logits.squeeze(-1)
-
-        outputs = (start_logits, end_logits,) + outputs[2:] # tuple concatenation, start logits, end logits, 
-        if start_positions is not None and end_positions is not None:
-            # If we are on multi-GPU, split add a dimension
-            if len(start_positions.size()) > 1:
-                start_positions = start_positions.squeeze(-1)
-            if len(end_positions.size()) > 1:
-                end_positions = end_positions.squeeze(-1)
-            # sometimes the start/end positions are outside our model inputs, we ignore these terms
-            ignored_index = start_logits.size(1)
-            start_positions.clamp_(0, ignored_index)
-            end_positions.clamp_(0, ignored_index)
-
-            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=ignored_index)
-            start_loss = loss_fct(start_logits, start_positions)
-            end_loss = loss_fct(end_logits, end_positions)
-            total_loss = (start_loss + end_loss) / 2
-            outputs = (total_loss,) + outputs
-
-        return outputs  # (loss), start_logits, end_logits, (hidden_states), (attentions)
-
-# Question
-# line 24. solved
-# line 30 implemented or not?
-# line 39,40,41
-# line 176
