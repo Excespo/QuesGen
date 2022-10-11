@@ -12,7 +12,7 @@ from transformers.models.bart.modeling_bart import BartPretrainedModel, BartMode
 
 import numpy as np
 
-# moved into `dataset.py`
+
 class StrctDataset(Dataset):
     """Dataset wrapping tensors
 
@@ -40,58 +40,14 @@ class StrctDataset(Dataset):
         return len(self.tensors[0])
 
 
-# Lists of strs storing the name of backbones and methods, corresponding to different (total) model TODO
-__BACKBONES__ = ["baseline", "bart"] # backbones pretrained models supported in the model, baseline is Bart
-__METHODS__ = ["baseline", "text_html"] # features-using methods supported in the model, baseline is textual and html features
-
-def to_model(backbone, method, config):
-    if backbone == "bart" and method == "text_html":
-        model_config = BartConfig(config)
-        return BartForQuestionGeneration(model_config)
-    else:
-        raise NotImplementedError("A combination of backbone and method unrecognizable")
-
-
-class BaseModelConfig(PretrainedConfig):
-    """The configuration base class to store the basic configurations of all models
-
-    Arguments:
-        backbone (str): the name of the backbone models, see __BACKBONES__
-        method (str): the name of the methods using different modalities or other features, see __METHODS__
-        kwargs (dict): correspond to the `PretrainedConfig` usage
-    """
-    def __self__(self, backbone, method, **kwargs):
-        super().__init__(**kwargs)
-        self.backbone = backbone if backbone in __BACKBONES__ else "baseline"
-        self.method = method if method in __METHODS__ else "baseline"
-
-class Backbone(nn.Module):
-    """
-    The wrapper class for backbone pretrained model
-    """
-    def __init__(self, config):
-        pass
-
-class QuestionGenerationModel(nn.Module):
-    """
-    The model class wrapper for all backbones and methods
-    """
-    def __init__(self, backbone, config):
-        pass
-
-class BartBlock(nn.Module):
-    """
-    The implementation of Bart backone net block
-    """
-
-class BartForQuestionGeneration(BartPretrainedModel):
+class Bart(BartPretrainedModel):
     """
     The implementation of the baseline method, with:
         - Bart being the backbone model
         - using only textual and html information
     """
     def __init__(self, config):
-        super(BartForQuestionGeneration, self).__init__(config) # diff super() <-> super(Bart, self) ?\
+        super(Bart, self).__init__(config) # diff super() <-> super(Bart, self) ?\
         # self.backbone = BartModel(config)
         self.backbone = BartForConditionalGeneration(config)
 
@@ -114,7 +70,7 @@ class BartForQuestionGeneration(BartPretrainedModel):
         output_hidden_states=None,
         return_dict=None,
     ):
-        ouputs = self.backbone(
+        outputs = self.backbone(
         input_ids=None,
         attention_mask=None,
         decoder_input_ids=None,
@@ -132,3 +88,11 @@ class BartForQuestionGeneration(BartPretrainedModel):
         output_hidden_states=None,
         return_dict=None
         )
+
+def 
+
+def load_and_cache_examples(model, tokenizer, eval=False):
+    pass
+
+def train(model, args, train_dataset, dev_dataset, tokenizer):
+    pass
