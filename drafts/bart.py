@@ -1,7 +1,9 @@
+from genericpath import exists
 import os
 import argparse
 import random
 import logging
+import timeit
 
 from tqdm import tqdm, trange
 import numpy as np
@@ -173,12 +175,89 @@ def train(model, targs, train_dataset, tokenizer):
 
     return global_step, train_loss / global_step
 
-def evaluate(model, targs, eval_dataset, tokenizer):
-    dataset, examples, features = load_and_cache_examples(targs, tokenizer, eval=True, output_examples=True)
-    if not os.path.exists(targs.output_dir, "")
-
-def load_and_cache_examples(args, tokenizer, eval=False, output_examples=False):
+def evaluate(model, targs, eval_dataset, tokenizer, suffix=""):
+    dataset, examples, features = load_and_cache_examples(targs, tokenizer, eval=True, output_examples=True) # donnot need to send in eval set as arguments?
+    if not os.path.exists(targs.output_dir):
+        os.makedirs(targs.output_dir)
+    targs.eval_batch_size = targs.per_gpu_eval_batch_size * 1 # no distribution here
     
+    eval_sampler = SequentialSampler(dataset)
+    eval_dataloader = DataLoader(dataset, batch_size=targs.eval_batch_size, sampler=eval_sampler)
+
+    # Eval begins
+    logger.info("***** Running evaluation {} *****".format(suffix))
+    logger.info("  Num examples = %d", len(dataset))
+    logger.info("  Batch size = %d", targs.eval_batch_size)
+    all_results = []
+    start_time = timeit.default_timer()
+
+    for batch in tqdm(eval_dataloader, decs="Evaluation"):
+        model.eval()
+        batch = tuple(t.to_device(targs.device) for t in batch)
+        with torch.no_grad():
+            inputs = {
+                "input_ids": batch[0],
+                "attention_masks": batch[1],
+                "token_type_ids": batch[2],
+            }???
+            feature_ids = batch[3]
+            outputs = model(**inputs)
+            for i, feature_id in enumerate(feature_ids):
+                eval_feature = features[feature_id.item()]
+                unique_id = int(eval_feature.unique_id)
+                result = RawResult(
+                    unique_id=unique_id,
+                    start_logits=to_list(outputs[0][i]) ??? no use of start/end logits in QG
+                )
+                all_results.append(result)
+
+    eval_time = timeit.default_timer() - start_time
+    logger.info("  Evaluation done in total %f secs (%f secs per example)", eval_time, (eval_time / len(dataset))
+
+    ??? all below should be modified as metrics are not the same
+    output_pred_file = os.path.join(targs.output_dir, "preds_{}.json".format(suffix))
+    output_tag_pred_file = os.path.join(targs.output_dir, "tag_preds_{}.json".format(suffix))
+    output_nbest_file = os.path.join(targs.output_dir, "nbest_preds_{}.json".format(suffix))
+    output_result_file = os.path.join(targs.output_dir, "qas_eva;_results_{}".format(suffix))
+    output_file = os.path.join(targs.output_dir, "eval_matrix_results_{}".format(suffix))
+
+    write_predictions(
+        all_examples=examples,
+        all_features=features,
+        all_results=all_results,
+        n_best_size=targs.num_best,
+        max_answer_length=targs.max_answer_length, ?? unset in args
+        do_lower_case=targs.do_lower_case, ?? arg not in bart model
+        output_prediction_file=output_pred_file,
+        output_tag_prediction_file=output_tag_pred_file,
+        output_nbest_file=output_nbest_file,
+        verbose_logging=targs.verbose_logging ?? unset in args
+        )
+
+    evaluate_options = EvalOpts(
+        data_file=targs.eval_file,
+        root_dir=targs.root_dir,
+        pred_file=output_pred_file,
+        tag_pred_file=output_tag_pred_file,
+        result_file=output_result_file,
+        outfile=output_file
+    )
+    results = evaluate_on_websrc(evaluate_options)
+    # Eval ends
+    return results
+
+def load_and_cache_examples(args, tokenizer, do_eval=False, output_examples=False):
+    file = args.eval_file if do_eval else args.train_file
+    cached_feature_file = os.path.join(os.path.dirname(file), "cached_features", "cached_{}_{}_{}_{}".format(
+        'eval' if do_eval else 'train',
+        list(filter(None, args.model_name_or_path.split('/'))).pop(),
+        str(args.max_seq_length),
+        args.method)
+        )
+    if not os.path.exists(os.path.dirname(cached_feature_file)):
+        os.makedirs(os.path.dirname(cached_feature_file))
+
+    if not 
 
 def parse_args():
     parser = argparse.ArgumentParser()
