@@ -1,17 +1,53 @@
 import os
+import argparse
+import random
+import logging
+
+from tqdm import tqdm, trange
+import numpy as np
 
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
 
-from transformers import PretrainedConfig
+from transformers import PretrainedConfig, AdamW, get_linear_schedule_with_warmup
 
 from transformers.models.bart.configuration_bart import BartConfig
 from transformers.models.bart.tokenization_bart import BartTokenizer
 from transformers.models.bart.modeling_bart import BartPretrainedModel, BartModel, BartForConditionalGeneration
 
-import numpy as np
+from ..utils import read_wrc_examples, convert_examples_to_features, RawResult, write_predictions
+from ..utils_evaluate import EvalOpts, main as evaluate_on_websrc 
 
+logger = logging.getLogger(__name__)
+logger.setLevel ???
+
+"""
+A naive version of bart-finetuning on websrc with textual and html features
+To do:
+    - distributed training
+    - common interface for backbones and methods
+    - combine train and eval
+    - SummaryWriter/ tensorBoardX
+    - other optimizers
+    - fp16, server for remote debugging...
+"""
+
+"""
+All breakpoints are args to be dealt from command line
+"""
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.backends.cudnn.enabled = True
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    # torch.cuda.manual_seed_all(seed) # if n_gpu > 0
+
+def to_list(tensor):
+    return tensor.detach().cpu().tolist()
 
 class StrctDataset(Dataset):
     """Dataset wrapping tensors
@@ -40,59 +76,200 @@ class StrctDataset(Dataset):
         return len(self.tensors[0])
 
 
-class Bart(BartPretrainedModel):
-    """
-    The implementation of the baseline method, with:
-        - Bart being the backbone model
-        - using only textual and html information
-    """
-    def __init__(self, config):
-        super(Bart, self).__init__(config) # diff super() <-> super(Bart, self) ?\
-        # self.backbone = BartModel(config)
-        self.backbone = BartForConditionalGeneration(config)
+def get_bart(config):
+    return BartForConditionalGeneration(config)
 
-    def forward(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        decoder_input_ids=None,
-        decoder_attention_mask=None,
-        head_mask=None,
-        decoder_head_mask=None,
-        cross_attn_head_mask=None,
-        encoder_outputs=None,
-        past_key_values=None,
-        inputs_embeds=None,
-        decoder_inputs_embeds=None,
-        labels=None,
-        use_cache=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
-    ):
-        outputs = self.backbone(
-        input_ids=None,
-        attention_mask=None,
-        decoder_input_ids=None,
-        decoder_attention_mask=None,
-        head_mask=None,
-        decoder_head_mask=None,
-        cross_attn_head_mask=None,
-        encoder_outputs=None,
-        past_key_values=None,
-        inputs_embeds=None,
-        decoder_inputs_embeds=None,
-        labels=None,
-        use_cache=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None
-        )
+def train(model, targs, train_dataset, tokenizer):
+    # tb_writer = SummaryWriter # from tensorboardX import SummaryWriter
 
-def 
+    # train args and data
+    targs.train_batch_size = targs.per_gpu_train_batch_size * 1 # no distribution here
+    train_sampler = RandomSampler(train_dataset)
+    train_dataloader = DataLoader(train_dataset, batch_size=targs.train_batch_size, sampler=train_sampler)
 
-def load_and_cache_examples(model, tokenizer, eval=False):
-    pass
+    if targs.max_steps > 0:
+        targs.num_training_epochs = targs.max_steps // (len(train_dataloader) // targs.gradient_accumulation_steps) + 1
+        num_training_steps = targs.max_steps
+    else:
+        num_training_steps = len(train_dataloader) // targs.gradient_accumulation_steps * targs.num_training_epochs
 
-def train(model, args, train_dataset, dev_dataset, tokenizer):
-    pass
+    # optimizer and schedule
+    no_decay = ['bias', 'LayerNorm.weight']
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)], 
+        'weight_decay': targs.weight_decay},
+        {'params':[p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+        'weight_decay': 0.0}
+    ]
+    optimizer = AdamW(optimizer_grouped_parameters, lr=targs.learing_rate, eps=targs.adam_epsilon)
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=targs.num_warmup_steps, num_training_steps=num_training_steps)
+
+    # Train begins
+    logger.info("***** Running training *****")
+    logger.info("  Num examples = %d", len(train_dataset))
+    logger.info("  Num Epochs = %d", targs.num_training_epochs)
+    logger.info("  Instantaneous batch size per GPU = %d", targs.per_gpu_train_batch_size)
+    logger.info("  Total train batch size = %d", targs.train_batch_size * targs.gradient_accumulation_steps)
+    # logger.info("  Total train batch size (w. parallel, distributed & accumulation) = %d",
+    #             targs.train_batch_size * args.gradient_accumulation_steps * (
+    #                 torch.distributed.get_world_size() if args.local_rank != -1 else 1))
+    logger.info("  Gradient Accumulation steps = %d", targs.gradient_accumulation_steps)
+    logger.info("  Total optimization steps = %d", num_training_steps)
+
+    global_step = 0
+    train_loss, logging_loss = 0.0, 0.0 # logging_loss for SummaryWriter
+    model.zero_grad()
+    train_trange = trange(int(targs.num_train_epochs), decs="Epoch")
+    set_seed(targs.seed)
+    for _ in train_trange:
+        epoch_iterator = tqdm(train_dataloader, desc="Iter")
+        for step, batch in enumerate(epoch_iterator):
+            model.train()
+            batch = tuple(t.to(targs.device) for t in batch)
+            inputs = {
+                'input_ids': batch[0],
+                'attention_mask': batch[1],
+                'token_type_ids': batch[2],
+                ???
+            }
+            outputs = model(**inputs) ??? Why using a dict to copy input
+            loss = outputs[0] ???
+
+            if targs.gradient_accumulation_steps > 1:
+                loss = loss / targs.gradient_accumulation_steps
+            loss.backward()
+
+            train_loss += loss.item()
+            if (step + 1) % targs.gradient_accumulation_steps == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), targs.max_grad_norm)
+
+                optimizer.step()
+                scheduler.step()
+                model.zero_grad()
+                global_step += 1
+
+                if targs.logging_steps > 0 and global_step % targs.logging_steps == 0:
+                    pass
+
+                if targs.saving_steps > 0 and global_step % targs.saving_steps == 0:
+                    # save model checkpoints
+                    ckpt_dir = os.path.join(targs.output_dir, "chpt-{}".format(global_step))
+                    if not os.path.exists(ckpt_dir):
+                        os.makedirs(ckpt_dir)
+                    ckpt = model.module if hasattr(model, "module") else model
+                    ckpt.save_pratrained(ckpt_dir)
+                    torch.save(targs, os.path.join(ckpt_dir, "training_args.bin"))
+                    logging.info("Saving model checkpoint to %s", ckpt_dir)
+
+            if 0 < targs.max_steps < global_step:
+                epoch_iterator.close()
+                break
+
+        if 0 < targs.max_steps < global_step:
+            train_trange.close()
+            break;
+    # Train ends    
+    # tb_writer.close()
+
+    return global_step, train_loss / global_step
+
+def evaluate(model, targs, eval_dataset, tokenizer):
+    dataset, examples, features = load_and_cache_examples(targs, tokenizer, eval=True, output_examples=True)
+    if not os.path.exists(targs.output_dir, "")
+
+def load_and_cache_examples(args, tokenizer, eval=False, output_examples=False):
+    
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+
+    def to_run_args(args):
+        return args
+    def to_model_args(args):
+        return args
+    def to_train_args(args):
+        return args
+    # Required args
+    # run    
+    parser.add_argument("--root_dir", default=None, type=str, required=True,
+                        help="The root directory of the raw WebSRC dataset, containing all html files")
+    parser.add_argument("--train_file", default=None, type=str, required=True,
+                        help="Json file for training, e.g. train-v1.0.json")
+    parser.add_argument("--eval_file", default=None, type=str, required=True,
+                        help="Json file for evaluations, e.g. dev-v1.0.json or test-v1.0.json")
+    # model
+    parser.add_argument("--backbone", default="baseline", type=str, required=True,
+                        help="Indicate the backbone model")
+    parser.add_argument("--method", default="baseline", type=str, required=True,
+                        help="Indicate the method using to deal with features")
+    # train
+    parser.add_argument("--output_dir", default=None, type=str, required=True,
+                        help="The output directory where the model checkpoints and the predictions locate")
+    
+    # Optional args
+    # run
+    parser.add_argument("--run_train", action='store_true', required=False,
+                        help="Run training")
+    parser.add_argument("--run_eval", action='store_true', required=False,
+                        help="Run eval on dev or test")
+    parser.add_argument("--eval_when_train", action='store_true', required=False, 
+                        help="Run eval during training at each logging phase")
+    parser.add_argument("--eval_all_ckpts", action='store_true', required=False, 
+                        help="Eval on all checkpoints with same prefix as model_name_or_path") ???
+    parser.add_argument("--ckpts_min", default=0, type=int, required=False, 
+                        help="Eval on checkpoints with suffix larger than or equal to it, beside the final one with no suffix")
+    parser.add_argument("--ckpts_max", default=None, type=int, required=False, 
+                        help="Eval on checkpoints with suffix smaller than it, beside the final one with no suffix")
+    parser.add_argument("--no_cuda", action='store_true',
+                        help="Whether not to use CUDA")
+    # model
+    parser.add_argument("--config_name_or_path", default="", type=str, required=False,
+                        help="Pretrained config name or path")
+    parser.add_argument("--tokenizer_name_or_path", default="", type=str, required=False,
+                        help="Pretrained tokenizer name or path")
+    parser.add_argument("--download_model_path", default=3000, type=int, required=False,
+                        help="Path to store the downloaded pretrained model")
+    # training
+    parser.add_argument("--per_gpu_train_batch_size", default=8, type=int, required=False,
+                        help="Batch size per GPU/CPU during training")
+    parser.add_argument("--per_gpu_eval_batch_size", default=None, type=int, required=False,
+                        help="Batch size per GPU/CPU during eval")
+    parser.add_argument("--learning_rate", default=1e-5, type=float, required=False,
+                        help="The initial learning rate for AdamW")
+    parser.add_argument("--adam_eps", default=1e-8, type=float, required=False,
+                        help="Epsilon for AdamW")
+    parser.add_argument("--weight_decay", default=0.0, type=float, required=False,
+                        help="Weight decay on layers if we apply it")
+    parser.add_argument("--max_grad_norm", default=1.0, type=float, required=False,
+                        help="Max gradient norm, clip it if larger than it")
+    parser.add_argument("--num_training_epochs", default=3, type=int, required=False,
+                        help="Total epochs during training")
+    parser.add_argument("--max_steps", default=-1, type=int, required=False,
+                        help="Override num_training_epochs if > 0, set total training steps")
+    parser.add_argument("--gradient_accumulation_steps", default=1, type=int, required=False,
+                        help="Number of steps to update gradient by backward passing")
+    parser.add_argument("--warmup_steps", default=0, type=int, required=False,
+                        help="Linear warmup steps")
+    parser.add_argument("--logging_steps", default=3000, type=int, required=False,
+                        help="Log every X training steps")
+    parser.add_argument("--saving_steps", default=3000, type=int, required=False,
+                        help="Save checkpoint every X training steps")
+    parser.add_argument("--num_nbest", default=20, type=int, required=False,
+                        help="Number of n best predictions to generate in the nbest_preds.json file")
+    parser.add_argument("--seed", default=42, type=int, required=False,
+                        help="Random seed for initialization")
+    parser.add_argument("--overwrite_output_dir", action='store_true',
+                        help="Overwrite the content of the output directory (if exists)")
+    parser.add_argument("--overwrite_cache", action='store_true',
+                        help="Overwrite the cached training and evaluation datasets")
+
+    args = parser.parse_args()
+    rargs = to_run_args(args)
+    margs = to_model_args(args)
+    targs = to_train_args(args)
+    return rargs, margs, targs
+
+if __name__ == "__main__":
+    rargs, margs, targs = parse_args()
+    bart_config = BartConfig(...)
+    bart = 

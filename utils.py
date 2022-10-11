@@ -10,7 +10,7 @@ from os import path as osp
 from tqdm import tqdm
 import bs4
 from bs4 import BeautifulSoup as bs
-from transformers.tokenization_bert import BasicTokenizer, whitespace_tokenize
+from transformers.models.bert.tokenization_bert import BasicTokenizer, whitespace_tokenize
 
 logger = logging.getLogger(__name__)
 

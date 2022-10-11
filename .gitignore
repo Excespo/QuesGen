@@ -132,3 +132,6 @@ dmypy.json
 data/SQuAD2.0/
 data/WebSRC/complete/
 data/WebSRC/reduced/
+
+# ignore mac meta info files
+.DS_Store
