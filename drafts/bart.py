@@ -1,4 +1,6 @@
+from functools import cache
 from genericpath import exists
+from lib2to3.pgen2 import token
 import os
 import argparse
 import random
@@ -18,11 +20,11 @@ from transformers.models.bart.configuration_bart import BartConfig
 from transformers.models.bart.tokenization_bart import BartTokenizer
 from transformers.models.bart.modeling_bart import BartPretrainedModel, BartModel, BartForConditionalGeneration
 
-from ..utils import read_wrc_examples, convert_examples_to_features, RawResult, write_predictions
-from ..utils_evaluate import EvalOpts, main as evaluate_on_websrc 
+from utils import read_wrc_examples, convert_examples_to_features, RawResult, write_predictions
+from utils_evaluate import EvalOpts, eval_on_websrc 
 
 logger = logging.getLogger(__name__)
-logger.setLevel ???
+logging.basicConfig(level=logging.INFO)
 
 """
 A naive version of bart-finetuning on websrc with textual and html features
@@ -51,7 +53,7 @@ def set_seed(seed):
 def to_list(tensor):
     return tensor.detach().cpu().tolist()
 
-class StrctDataset(Dataset):
+class StructDataset(Dataset):
     """Dataset wrapping tensors
 
     Each sample will be retrieved by indexing tensors along the first dimension
@@ -79,6 +81,27 @@ class StrctDataset(Dataset):
 
 
 def get_bart(config):
+    """
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        decoder_input_ids=None,
+        decoder_attention_mask=None,
+        head_mask=None,
+        decoder_head_mask=None,
+        cross_attn_head_mask=None,
+        encoder_outputs=None,
+        past_key_values=None,
+        inputs_embeds=None,
+        decoder_inputs_embeds=None,
+        labels=None,
+        use_cache=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+    """
     return BartForConditionalGeneration(config)
 
 def train(model, targs, train_dataset, tokenizer):
@@ -207,12 +230,12 @@ def evaluate(model, targs, eval_dataset, tokenizer, suffix=""):
                 unique_id = int(eval_feature.unique_id)
                 result = RawResult(
                     unique_id=unique_id,
-                    start_logits=to_list(outputs[0][i]) ??? no use of start/end logits in QG
-                )
+                    start_logits=to_list(outputs[0][i])
+                ) ??? no use of start/end logits in QG
                 all_results.append(result)
 
     eval_time = timeit.default_timer() - start_time
-    logger.info("  Evaluation done in total %f secs (%f secs per example)", eval_time, (eval_time / len(dataset))
+    logger.info("  Evaluation done in total %f secs (%f secs per example)", eval_time, (eval_time / len(dataset)))
 
     ??? all below should be modified as metrics are not the same
     output_pred_file = os.path.join(targs.output_dir, "preds_{}.json".format(suffix))
@@ -242,7 +265,7 @@ def evaluate(model, targs, eval_dataset, tokenizer, suffix=""):
         result_file=output_result_file,
         outfile=output_file
     )
-    results = evaluate_on_websrc(evaluate_options)
+    results = eval_on_websrc(evaluate_options)
     # Eval ends
     return results
 
@@ -254,10 +277,42 @@ def load_and_cache_examples(args, tokenizer, do_eval=False, output_examples=Fals
         str(args.max_seq_length),
         args.method)
         )
+
     if not os.path.exists(os.path.dirname(cached_feature_file)):
         os.makedirs(os.path.dirname(cached_feature_file))
 
-    if not 
+    if os.path.exists(cached_feature_file) and not args.overwrite_cache:
+        logger.info("Loading features from cached files %s", cached_feature_file)
+        features = torch.load(cached_feature_file)
+        if output_examples: # ??? when output examples, and what is examples?!?
+            examples, tag_list = read_wrc_examples(
+                input_file=file,
+                root_dir=args.root_dir,
+                is_training=(not do_eval),
+                tokenizer=tokenizer,
+                method=args.method,
+                simplify=True
+            )
+            if not do_eval:
+                tag_list = list(tag_list).sort()
+                tokenizer.add_tokens(tag_list)
+        else:
+            examples = None
+    else:
+        logger.info("Caching features from dataset at %s", file)
+
+    if do_eval:
+        all_feature_id = torch.arange(all_input_ids.size(0), dtype=torch.long)
+        tensors = (all_input_ids, all_input_masks, all_segment_ids, ...)
+        dataset = StructDataset(*tensors, page_ids=all_page_ids, token_to_tag=all_token_to_tag)
+    else:
+        ???
+    
+    if output_examples:
+        dataset = (dataset, examples, features)
+    return dataset
+
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
