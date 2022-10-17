@@ -1,11 +1,9 @@
-from functools import cache
-from genericpath import exists
-from lib2to3.pgen2 import token
 import os
 import argparse
 import random
 import logging
 import timeit
+import math
 
 from tqdm import tqdm, trange
 import numpy as np
@@ -52,6 +50,51 @@ def set_seed(seed):
 
 def to_list(tensor):
     return tensor.detach().cpu().tolist()
+
+class TextEvalMetrics:
+    """
+    Implementation of bleu, rouge, kl divergence, ...
+    """
+    def __init__(self, candidate_sentence, reference_sentence_list):
+        self.candidate = candidate_sentence
+        self.reference_list = reference_sentence_list
+
+    def calculate_bleu(self, n_gram=4, fn_word_piece_tokenizer=lambda s: s.split()):
+        def to_ngram_pieces(sentence, n_gram):
+            single_word_pieces = fn_word_piece_tokenizer(sentence)
+            ngram_word_pieces = [" ".split(single_word_pieces[i:i+n_gram]) 
+                                for i in range(len(single_word_pieces)-n_gram+1)]
+            return ngram_word_pieces
+        def calculate_penalty(candidate, reference_list):
+            lc, lr = len(candidate), min(map(len, reference_list))
+            return 1 if lc > lr else math.exp(1-lr/lc)
+        def n_gram_weight(n_gram):
+            return 1 / n_gram
+
+        penalty_factor = calculate_penalty(self.candidate, self.reference_list)
+        bleu_scores, overall_bleu_score = [], 0
+        for ref in self.reference_list:
+            bleu_score = penalty_factor * math.exp()
+            bleu_scores.append(bleu_score)
+        
+        return bleu_scores, overall_bleu_score
+
+    def calculate_rouge(self):
+        pass
+
+    def calculate_kl_divergence(self):
+        pass
+
+    def calculate_all(self):
+        all_results = {
+            "bleu-1": self.calculate_bleu(n_gram=1),
+            "bleu-2": self.calculate_bleu(n_gram=2),
+            "bleu-3": self.calculate_bleu(n_gram=3),
+            "bleu-4": self.calculate_bleu(n_gram=4),
+            "rouge": self.calculate_rouge(),
+            "kl_divergence": self.calculate_kl_divergence(),
+        }
+        return all_results
 
 class StructDataset(Dataset):
     """Dataset wrapping tensors
