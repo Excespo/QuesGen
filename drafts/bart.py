@@ -4,6 +4,7 @@ import random
 import logging
 import timeit
 import math
+import glob
 
 from tqdm import tqdm, trange
 import numpy as np
@@ -12,13 +13,13 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
 
-from transformers import PretrainedConfig, AdamW, get_linear_schedule_with_warmup
+from transformers import WEIGHTS_NAME, AutoConfig, AutoTokenizer, PretrainedConfig, AdamW, get_linear_schedule_with_warmup, AutoModelForSeq2SeqLM
 
 from transformers.models.bart.configuration_bart import BartConfig
 from transformers.models.bart.tokenization_bart import BartTokenizer
 from transformers.models.bart.modeling_bart import BartPretrainedModel, BartModel, BartForConditionalGeneration
 
-from utils import read_wrc_examples, convert_examples_to_features, RawResult, write_predictions
+from utils import read_wrc_examples_to_qa as read_wrc_examples, convert_examples_to_features, RawResult, write_predictions
 from utils_evaluate import EvalOpts, eval_on_websrc 
 
 logger = logging.getLogger(__name__)
@@ -79,10 +80,10 @@ class TextEvalMetrics:
         
         return bleu_scores, overall_bleu_score
 
-    def calculate_rouge(self):
+    def calculate_rouge_l(self):
         pass
 
-    def calculate_kl_divergence(self):
+    def calculate_meteor(self):
         pass
 
     def calculate_all(self):
@@ -91,8 +92,8 @@ class TextEvalMetrics:
             "bleu-2": self.calculate_bleu(n_gram=2),
             "bleu-3": self.calculate_bleu(n_gram=3),
             "bleu-4": self.calculate_bleu(n_gram=4),
-            "rouge": self.calculate_rouge(),
-            "kl_divergence": self.calculate_kl_divergence(),
+            "rouge-l": self.calculate_rouge_l(),
+            "metoer": self.meteor(),
         }
         return all_results
 
@@ -123,7 +124,7 @@ class StructDataset(Dataset):
         return len(self.tensors[0])
 
 
-def get_bart(config):
+def get_pretrained_model_and_tokenizer(args):
     """
     def forward(
         self,
@@ -144,8 +145,39 @@ def get_bart(config):
         output_hidden_states=None,
         return_dict=None,
     ):
+        ...
+        return Seq2SeqLMOutput(
+            loss=masked_lm_loss,
+            logits=lm_logits,
+            past_key_values=outputs.past_key_values,
+            decoder_hidden_states=outputs.decoder_hidden_states,
+            decoder_attentions=outputs.decoder_attentions,
+            cross_attentions=outputs.cross_attentions,
+            encoder_last_hidden_state=outputs.encoder_last_hidden_state,
+            encoder_hidden_states=outputs.encoder_hidden_states,
+            encoder_attentions=outputs.encoder_attentions,
+        )
     """
-    return BartForConditionalGeneration(config)
+    config = AutoConfig.from_pretrained(args.config_name_or_path if args.config_name_or_path is not None else args.backbone_model_name_or_path,
+                                        cache_dir=args.download_model_path)
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name_or_path if args.tokenizer_name_or_path is not None else args.backbone_model_name_or_path,
+                                        cache_dir=args.download_model_path)
+    model = AutoModelForSeq2SeqLM.from_pretrained(args.pretrained_model_name_or_path,
+                                        config=config, cache_dir=args.download_model_path)
+    return model, tokenizer
+
+def generation_demo(model, tokenizer, examples):
+    texts = [e.doc_tokens for e in examples]
+    inputs = tokenizer(texts, max_length=1024, return_tensors="pt")
+    generation_ids = model.generate(inputs["input_ids"], num_beams=5, min_length=0, max_length=32)
+    qg_pairs = {}
+    for g_id, text in zip(generation_ids, texts):
+        question = tokenizer.decode(g_id, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+        qg_pairs.update({text: question})
+    return qg_pairs
+
+def calculate_metrics():
+    pass
 
 def train(model, targs, train_dataset, tokenizer):
     # tb_writer = SummaryWriter # from tensorboardX import SummaryWriter
@@ -190,18 +222,16 @@ def train(model, targs, train_dataset, tokenizer):
     train_trange = trange(int(targs.num_train_epochs), decs="Epoch")
     set_seed(targs.seed)
     for _ in train_trange:
-        epoch_iterator = tqdm(train_dataloader, desc="Iter")
+        epoch_iterator = tqdm(train_dataloader, desc="Iter ")
         for step, batch in enumerate(epoch_iterator):
             model.train()
             batch = tuple(t.to(targs.device) for t in batch)
             inputs = {
                 'input_ids': batch[0],
                 'attention_mask': batch[1],
-                'token_type_ids': batch[2],
-                ???
             }
-            outputs = model(**inputs) ??? Why using a dict to copy input
-            loss = outputs[0] ???
+            outputs = model(**inputs)
+            loss, logits = outputs[0], outputs[1]
 
             if targs.gradient_accumulation_steps > 1:
                 loss = loss / targs.gradient_accumulation_steps
@@ -241,7 +271,8 @@ def train(model, targs, train_dataset, tokenizer):
 
     return global_step, train_loss / global_step
 
-def evaluate(model, targs, eval_dataset, tokenizer, suffix=""):
+def evaluate(model, targs, tokenizer, suffix=""): # read dataset in fn?? wtf
+    # should consists of the stages: init -> eval -> metrics -> demonstrate
     dataset, examples, features = load_and_cache_examples(targs, tokenizer, eval=True, output_examples=True) # donnot need to send in eval set as arguments?
     if not os.path.exists(targs.output_dir):
         os.makedirs(targs.output_dir)
@@ -264,59 +295,58 @@ def evaluate(model, targs, eval_dataset, tokenizer, suffix=""):
             inputs = {
                 "input_ids": batch[0],
                 "attention_masks": batch[1],
-                "token_type_ids": batch[2],
-            }???
+            }
             feature_ids = batch[3]
-            outputs = model(**inputs)
-            for i, feature_id in enumerate(feature_ids):
-                eval_feature = features[feature_id.item()]
+            generation_ids = model.generate(inputs["input_ids"], num_beams=5, min_length=0, max_length=32)
+            qg_pairs = {}
+            for i, f_id in enumerate(feature_ids):
+                g_id = generation_ids[i]
+                eval_feature = features[f_id.item()]
                 unique_id = int(eval_feature.unique_id)
-                result = RawResult(
-                    unique_id=unique_id,
-                    start_logits=to_list(outputs[0][i])
-                ) ??? no use of start/end logits in QG
-                all_results.append(result)
+                question = tokenizer.decode(g_id, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+                qg_pairs.update({unique_id: question})
+
+                # deal more with u_id to text etc...
 
     eval_time = timeit.default_timer() - start_time
     logger.info("  Evaluation done in total %f secs (%f secs per example)", eval_time, (eval_time / len(dataset)))
 
-    ??? all below should be modified as metrics are not the same
-    output_pred_file = os.path.join(targs.output_dir, "preds_{}.json".format(suffix))
-    output_tag_pred_file = os.path.join(targs.output_dir, "tag_preds_{}.json".format(suffix))
-    output_nbest_file = os.path.join(targs.output_dir, "nbest_preds_{}.json".format(suffix))
-    output_result_file = os.path.join(targs.output_dir, "qas_eva;_results_{}".format(suffix))
-    output_file = os.path.join(targs.output_dir, "eval_matrix_results_{}".format(suffix))
+    demo_output_file = os.path.join(targs.output_dir, "_demo_{}".format(suffix))
 
-    write_predictions(
-        all_examples=examples,
-        all_features=features,
-        all_results=all_results,
-        n_best_size=targs.num_best,
-        max_answer_length=targs.max_answer_length, ?? unset in args
-        do_lower_case=targs.do_lower_case, ?? arg not in bart model
-        output_prediction_file=output_pred_file,
-        output_tag_prediction_file=output_tag_pred_file,
-        output_nbest_file=output_nbest_file,
-        verbose_logging=targs.verbose_logging ?? unset in args
-        )
+    # write_predictions(
+    #     all_examples=examples,
+    #     all_features=features,
+    #     all_results=all_results,
+    #     n_best_size=targs.num_best,
+    #     max_answer_length=targs.max_answer_length, ?? unset in args
+    #     do_lower_case=targs.do_lower_case, ?? arg not in bart model
+    #     output_prediction_file=output_pred_file,
+    #     output_tag_prediction_file=output_tag_pred_file,
+    #     output_nbest_file=output_nbest_file,
+    #     verbose_logging=targs.verbose_logging ?? unset in args
+    #     )
 
-    evaluate_options = EvalOpts(
-        data_file=targs.eval_file,
-        root_dir=targs.root_dir,
-        pred_file=output_pred_file,
-        tag_pred_file=output_tag_pred_file,
-        result_file=output_result_file,
-        outfile=output_file
-    )
-    results = eval_on_websrc(evaluate_options)
+    # evaluate_options = EvalOpts(
+    #     data_file=targs.eval_file,
+    #     root_dir=targs.root_dir,
+    #     pred_file=output_pred_file,
+    #     tag_pred_file=output_tag_pred_file,
+    #     result_file=output_result_file,
+    #     outfile=output_file
+    # )
+    # results = eval_on_websrc(evaluate_options)
     # Eval ends
     return results
 
-def load_and_cache_examples(args, tokenizer, do_eval=False, output_examples=False):
-    file = args.eval_file if do_eval else args.train_file
+def load_and_cache_examples(args, tokenizer, run_eval=False, output_examples=False):
+    """
+    Support args.method = ["text", "text-html"]
+    """
+    args.method = args.method.lower()
+    file = args.eval_file if run_eval else args.train_file
     cached_feature_file = os.path.join(os.path.dirname(file), "cached_features", "cached_{}_{}_{}_{}".format(
-        'eval' if do_eval else 'train',
-        list(filter(None, args.model_name_or_path.split('/'))).pop(),
+        'eval' if run_eval else 'train',
+        list(filter(None, args.pretrained_model_name_or_path.split('/'))).pop(),
         str(args.max_seq_length),
         args.method)
         )
@@ -327,16 +357,16 @@ def load_and_cache_examples(args, tokenizer, do_eval=False, output_examples=Fals
     if os.path.exists(cached_feature_file) and not args.overwrite_cache:
         logger.info("Loading features from cached files %s", cached_feature_file)
         features = torch.load(cached_feature_file)
-        if output_examples: # ??? when output examples, and what is examples?!?
+        if output_examples or (args.method != "text" and not run_eval):
             examples, tag_list = read_wrc_examples(
                 input_file=file,
                 root_dir=args.root_dir,
-                is_training=(not do_eval),
+                is_training=(not run_eval),
                 tokenizer=tokenizer,
-                method=args.method,
+                method="T-PLM" if args.method=="text" else "H-PLM", # modify later
                 simplify=True
             )
-            if not do_eval:
+            if not run_eval and args.method != "text":
                 tag_list = list(tag_list).sort()
                 tokenizer.add_tokens(tag_list)
         else:
@@ -344,18 +374,58 @@ def load_and_cache_examples(args, tokenizer, do_eval=False, output_examples=Fals
     else:
         logger.info("Caching features from dataset at %s", file)
 
-    if do_eval:
-        all_feature_id = torch.arange(all_input_ids.size(0), dtype=torch.long)
-        tensors = (all_input_ids, all_input_masks, all_segment_ids, ...)
-        dataset = StructDataset(*tensors, page_ids=all_page_ids, token_to_tag=all_token_to_tag)
+        if args.method != "text" and not run_eval:
+            examples, tag_list = read_wrc_examples(
+                input_file=file,
+                root_dir=args.root_dir,
+                is_training=(not run_eval),
+                tokenizer=tokenizer,
+                method="T-PLM" if args.method=="text" else "H-PLM", # modify later
+                simplify=True
+            )
+            tag_list = list(tag_list).sort()
+            tokenizer.add_tokens(tag_list)
+
+        examples, _ = read_wrc_examples(
+            input_file=file,
+            root_dir=args.root_dir,
+            is_training=(not run_eval),
+            tokenizer=tokenizer,
+            method=args.method,
+            simplify=False
+            )
+        features = convert_examples_to_features(
+            examples=examples,
+            tokenizer=tokenizer,
+            max_seq_length=args.max_seq_length,
+            doc_stride=args.doc_stride,
+            max_query_length=args.max_question_length, # why query? modify later
+            is_training=(not run_eval)
+        )
+        if args.save_features:
+            logger.info("Saving features into cached file %s", cached_feature_file)
+            torch.save(features, cached_feature_file)
+    
+    all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
+    all_input_mask = torch.tensor([f.input_mask for f in features], dtype=torch.long)
+    all_segment_ids = torch.tensor([f.segment_ids for f in features], dtype=torch.long)
+    all_page_ids, all_token_to_tag = None, None
+
+    if run_eval:
+        all_feature_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
+        dataset = StructDataset(
+            all_input_ids, all_input_mask, all_segment_ids, all_feature_index,
+            page_ids=all_page_ids, token_to_tag=all_token_to_tag
+        )
     else:
-        ???
+        dataset = StructDataset(
+            all_input_ids, all_input_mask, all_segment_ids,
+            page_ids=all_page_ids, token_to_tag=all_token_to_tag
+        )
     
     if output_examples:
         dataset = (dataset, examples, features)
     return dataset
-
-
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -379,6 +449,8 @@ def parse_args():
                         help="Indicate the backbone model")
     parser.add_argument("--method", default="baseline", type=str, required=True,
                         help="Indicate the method using to deal with features")
+    parser.add_argument("--pretrained_model_name_or_path", type=str, required=True,
+                        help="Path to pretrained model or model identifier from huggingface.co/models")
     # train
     parser.add_argument("--output_dir", default=None, type=str, required=True,
                         help="The output directory where the model checkpoints and the predictions locate")
@@ -392,7 +464,7 @@ def parse_args():
     parser.add_argument("--eval_when_train", action='store_true', required=False, 
                         help="Run eval during training at each logging phase")
     parser.add_argument("--eval_all_ckpts", action='store_true', required=False, 
-                        help="Eval on all checkpoints with same prefix as model_name_or_path") ???
+                        help="Eval on all checkpoints with same prefix as pretrained_model_name_or_path") # what prefix
     parser.add_argument("--ckpts_min", default=0, type=int, required=False, 
                         help="Eval on checkpoints with suffix larger than or equal to it, beside the final one with no suffix")
     parser.add_argument("--ckpts_max", default=None, type=int, required=False, 
@@ -406,6 +478,14 @@ def parse_args():
                         help="Pretrained tokenizer name or path")
     parser.add_argument("--download_model_path", default=3000, type=int, required=False,
                         help="Path to store the downloaded pretrained model")
+    parser.add_argument("--max_seq_length", default=384, type=int, required=False,
+                        help="The maximum total input sequence length after WordPiece tokenization. "
+                                "Sequences longer than this value will be truncated, "
+                                "and shorter ones will be padded")
+    parser.add_argument("--doc_stride", default=128, type=int, required=False,
+                        help="The stride distance to split up a long document into chunks")
+    parser.add_argument("--max_question_length", default=64, type=int, required=False,
+                        help="The maximum length of tokens for the question. Longer ones will be truncated to this value")
     # training
     parser.add_argument("--per_gpu_train_batch_size", default=8, type=int, required=False,
                         help="Batch size per GPU/CPU during training")
@@ -448,5 +528,78 @@ def parse_args():
 
 if __name__ == "__main__":
     rargs, margs, targs = parse_args()
-    bart_config = BartConfig(...)
-    bart = 
+    args = targs
+
+    if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.run_train and not args.overwrite_output_dir:
+        raise ValueError("Output directory {args.output_dir} already exists and non-empty. Try --overwrite_output_dir option to overwrite.")
+
+    # set cuda without distributed training
+    device = torch.device("cuda" if torch.cuda.is_available and not args.no_cuda else "cpu")
+    args.n_gpu = torch.cuda.device_count() if not args.no_cuda else 0
+    args.device = device
+
+    # setup logging for distributed training
+    pass
+
+    # set seed
+    set_seed(args.seed)
+
+    # set and load model
+    model, tokenizer = get_pretrained_model_and_tokenizer(args)
+
+    logging.info("Training parameters: %s", targs)
+
+    # fp16
+    pass
+
+    # Training
+    if args.run_train:
+        train_dataset = load_and_cache_examples(args, tokenizer, run_eval=False, output_examples=False)
+        tokenizer.save_pretrained(args.output_dir)
+        model.resize_token_embeddings(len(tokenizer))
+        model = model.to(device)
+        global_step, tr_avg_loss = train(model, args, train_dataset, tokenizer)
+
+        logger.info(f" global step = {global_step}, average loss = {tr_avg_loss}")
+
+        # save trained model and tokenizer
+        if not os.path.exists(args.output_dir):
+            os.makedirs(args.output_dir)
+        logger.info(f"Saving models checkpoint to {args.output_dir}")
+
+        model_to_save = model.module if hasattr(model, "module") else model
+        model_to_save = model.save_pretrained(args.output_dir)
+        tokenizer.save_pretrained(args.output_dir)
+        torch.save(args, os.path.join(args.output_dir, "training_args.bin"))
+
+    # Evaluation
+    results = {}
+    if args.run_eval:
+        ckpts = [args.output_dir]
+        if args.eval_all_ckpts:
+            ckpts = list(
+                os.path.dirname(c) for c in sorted(glob.glob(args.output_dir + "/**/" + WEIGHTS_NAME, recursive=True))
+            )
+            logging.getLogger("transformers.modeling_utils").setLevel(logging.WARN)
+
+        logger.info("Evaluate the following checkpoints: %s", ckpts)
+
+        for ckpt in ckpts:
+            global_step = ckpt.split("-")[-1] if len(ckpts) > 1 else ""
+            try:
+                int(global_step)
+            except ValueError:
+                global_step = ""
+            if global_step and int(global_step) < args.ckpts_min:
+                continue
+            if global_step and args.ckpts_max is not None and int(global_step) >= args.ckpts_max:
+                continue
+
+            model = AutoModelForSeq2SeqLM.from_pretrained(ckpt)
+            model = model.to(args.device)
+
+            result = evaluate(model, args, tokenizer, suffix=global_step)
+            result = dict((k + ("_{}".format(global_step) if global_step else ""), v) for k, v in result.items())
+            results.update(result)
+
+        logger.info(f"Results: {results}")

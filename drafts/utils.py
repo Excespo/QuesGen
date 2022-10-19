@@ -167,7 +167,14 @@ def read_wrc_examples_to_qa(input_file, root_dir, is_training, tokenizer, method
         set[str]: all the tag names appeared in the processed dataset, e.g. <div>, <img/>, </p>, etc..
     """
     with open(input_file, "r", encoding='utf-8') as reader:
-        input_data = json.load(reader)["data"]
+        input_data = json.load(reader)["data"] 
+        # here the input_file is the train_file or dev_file after preprocess (in form json)
+        # the json file is in the nested structure like:
+        #   version, data
+        #              -> domain (dir: sport, auto, ...), websites
+        #                                                       -> qas                                                     , page id
+        #                                                           -> question, id, answer
+        #                                                                                -> text, element id, answer start 
 
     def is_whitespace(c):
         if c == " " or c == "\t" or c == "\r" or c == "\n" or ord(c) == 0x202F:
@@ -412,8 +419,6 @@ def read_wrc_examples_to_qa(input_file, root_dir, is_training, tokenizer, method
                     examples.append(example)
     return examples, all_tag_list
 
-def read_wrc_examples_to_qg(input_file, root_dir, is_training, tokenizer, method, simplify=False):
-    
 
 def convert_examples_to_features(examples, tokenizer, max_seq_length, doc_stride, max_query_length, is_training,
                                  cls_token='[CLS]', sep_token='[SEP]', pad_token=0,
@@ -859,6 +864,7 @@ def _get_final_text(pred_text, orig_text, do_lower_case, verbose_logging=False):
 
     output_text = orig_text[orig_start_position:(orig_end_position + 1)]
     return output_text
+
 
 
 def _get_best_indexes(logits, n_best_size):
