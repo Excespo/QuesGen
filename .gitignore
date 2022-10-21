@@ -135,3 +135,7 @@ data/WebSRC/reduced/
 
 # ignore mac meta info files
 .DS_Store
+
+# ignore model checkpoints
+drafts/tmp_model/
+drafts/tmp_result/

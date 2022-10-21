@@ -300,7 +300,7 @@ def read_wrc_examples_to_qa(input_file, root_dir, is_training, tokenizer, method
             # Generate Doc Tokens
             page_id = website["page_id"]
             curr_dir = osp.join(root_dir, domain, page_id[0:2], 'processed_data')
-            print(f"root_dir: {root_dir}, domain: {domain}, pageid: {page_id[0:2]}, curr_dir: {curr_dir}")
+            # print(f"root_dir: {root_dir}, domain: {domain}, pageid: {page_id[0:2]}, curr_dir: {curr_dir}")
             html_file = open(osp.join(curr_dir, page_id + '.html')).read()
             html_code = bs(html_file) # BeautifulSoup object from html doc
             raw_text_list, tag_num = html_to_text_list(html_code) # raw_text_list is a list of all contents of 
@@ -369,6 +369,7 @@ def read_wrc_examples_to_qa(input_file, root_dir, is_training, tokenizer, method
                 for qa in website["qas"]:
                     qas_id = qa["id"]
                     question_text = qa["question"]
+                    assert question_text is not None, "How can question text is None??? utils.py line 372."
                     start_position = None
                     end_position = None
                     orig_answer_text = None
@@ -503,10 +504,11 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, doc_stride
             segment_ids.append(cls_token_segment_id)
             token_to_tag_index.append(example.tag_num)
 
-            # Query
-            tokens += query_tokens
-            segment_ids += [sequence_a_segment_id] * len(query_tokens)
-            token_to_tag_index += [example.tag_num] * len(query_tokens)
+            # HERE IN QG We don't add query tokens into the input sequence
+            # # Query
+            # tokens += query_tokens
+            # segment_ids += [sequence_a_segment_id] * len(query_tokens)
+            # token_to_tag_index += [example.tag_num] * len(query_tokens)
 
             # SEP token
             tokens.append(sep_token)
