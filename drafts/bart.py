@@ -280,7 +280,7 @@ def train(model, targs, tokenizer):
                     if not os.path.exists(ckpt_dir):
                         os.makedirs(ckpt_dir)
                     ckpt = model.module if hasattr(model, "module") else model
-                    ckpt.save_pratrained(ckpt_dir)
+                    ckpt.save_pretrained(ckpt_dir)
                     torch.save(targs, os.path.join(ckpt_dir, "training_args.bin"))
                     logging.info("Saving model checkpoint to %s", ckpt_dir)
 
