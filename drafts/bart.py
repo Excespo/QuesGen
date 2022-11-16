@@ -7,6 +7,8 @@ import logging
 import timeit
 import math
 import glob
+import json
+import collections
 
 from tqdm import tqdm, trange
 import numpy as np
@@ -296,6 +298,22 @@ def train(model, targs, tokenizer):
 
     return global_step, train_loss / global_step
 
+QuesGenPair = collections.namedtuple("QuenGenPair",
+                                    ["question", "generated_text", "label_text"])
+
+def eval_qgpairs(qg_pair_file, use_nlgeval=True):
+    if use_nlgeval:
+        try:
+            from nlgeval import NLGEval
+        except:
+            print("Failure when importing nlgeval. Try install nlgeval or set False to `use_nlgeval`")
+
+        evalor = NLGEval()
+        # metrics_dict = evalor.compute_individual_metrics(qg_pair.gen, qg_pair.label)
+        
+
+    return
+
 def evaluate(model, targs, tokenizer, suffix=""): # read dataset in fn?? wtf
     # should consists of the stages: init -> eval -> metrics -> demonstrate
     dataset, examples, features = load_and_cache_examples(targs, tokenizer, run_eval=True) # donnot need to send in eval set as arguments?
@@ -310,7 +328,7 @@ def evaluate(model, targs, tokenizer, suffix=""): # read dataset in fn?? wtf
     logger.info("***** Running evaluation {} *****".format(suffix))
     logger.info("  Num examples = %d", len(dataset))
     logger.info("  Batch size = %d", targs.eval_batch_size)
-    all_results = []
+    all_qg_pairs = []
     start_time = timeit.default_timer()
 
     for batch in tqdm(eval_dataloader, desc="Evaluation"):
@@ -326,24 +344,62 @@ def evaluate(model, targs, tokenizer, suffix=""): # read dataset in fn?? wtf
             input_texts = [tokenizer.decode(i_id, skip_special_tokens=True, clean_up_tokenization_spaces=False) for i_id in input_ids]
             label_texts = [tokenizer.decode(label, skip_special_tokens=True, clean_up_tokenization_spaces=False) for label in labels]
             generation_ids = model.generate(inputs["input_ids"], num_beams=5, min_length=0, max_length=args.max_question_length)
-            qg_pairs = {}
+            
             for i, f_id in enumerate(feature_ids):
                 g_id = generation_ids[i]
                 eval_feature = features[f_id.item()]
                 unique_id = int(eval_feature.unique_id)
                 question = tokenizer.decode(g_id, skip_special_tokens=True, clean_up_tokenization_spaces=False)
-                print(input_texts[i])
-                print(label_texts[i])
-                print(question) # all the same???
+                # print(input_texts[i])
+                # print(label_texts[i])
+                # print(question) # all the same???
+                qg_pair = QuesGenPair(
+                    question=question,
+                    generated_text=input_texts[i], 
+                    label_text=label_texts[i]
+                )
+                print(qg_pair)
+                
                 print("test why model.generate gives the same ids. ")
-                qg_pairs.update({unique_id: question})
+                all_qg_pairs.append({unique_id: qg_pair})
 
                 # deal more with u_id to text etc...
+        # all_results.append(qg_pairs)
 
     eval_time = timeit.default_timer() - start_time
     logger.info("  Evaluation done in total %f secs (%f secs per example)", eval_time, (eval_time / len(dataset)))
 
-    demo_output_file = os.path.join(targs.output_dir, "_demo_{}".format(suffix))
+    question_texts, generated_texts, reference_texts = "", "", ""
+    for id, qg_pair in all_qg_pairs:
+        question_texts += (qg_pair.question + "\n")
+        generated_texts += (qg_pair.generated_text + "\n")
+        reference_texts += (qg_pair.label_text + "\n")
+
+    # write generation texts
+    question_texts_file = os.path.join(targs.output_dir, "_questions_{}.txt".format(suffix))
+    generated_texts_file = os.path.join(targs.output_dir, "_generated_{}.txt".format(suffix))
+    reference_texts_file = os.path.join(targs.output_dir, "_reference_{}.txt".format(suffix))
+    with open(question_texts_file, "w") as writer:
+        writer.write(question_texts)
+    with open(generated_texts_file, "w") as writer:
+        writer.write(generated_texts)
+    with open(reference_texts_file, "w") as writer:
+        writer.write(reference_texts)
+
+    # evaluate generation texts
+    eval_result_file = os.path.join(targs.output_dir, "_eval_result_{}.json".format(suffix))
+    try:
+        from nlgeval import NLGEval, compute_metrics
+    except:
+        print("Failure importing nlgeval")
+
+    # nlgeval = NLGEval()
+    metrics_dict = compute_metrics(
+                    hypothsis=generated_texts_file, 
+                    references=reference_texts_file)
+    with open(eval_result_file, "w") as writer:
+        writer.write(metrics_dict)
+
 
     # write_predictions(
     #     all_examples=examples,
@@ -358,6 +414,7 @@ def evaluate(model, targs, tokenizer, suffix=""): # read dataset in fn?? wtf
     #     verbose_logging=targs.verbose_logging ?? unset in args
     #     )
 
+
     # evaluate_options = EvalOpts(
     #     data_file=targs.eval_file,
     #     root_dir=targs.root_dir,
@@ -365,7 +422,7 @@ def evaluate(model, targs, tokenizer, suffix=""): # read dataset in fn?? wtf
     #     tag_pred_file=output_tag_pred_file,
     #     result_file=output_result_file,
     #     outfile=output_file
-    # )
+    # ) 
     # results = eval_on_websrc(evaluate_options)
     # Eval ends
     return results
